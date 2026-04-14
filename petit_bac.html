@@ -214,7 +214,7 @@
 
 <script type="module">
     import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js";
-    import { getDatabase, ref, set, onValue, update, get } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-database.js";
+    import { getDatabase, ref, set, onValue, update, get, onDisconnect } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-database.js";
 
     const firebaseConfig = {
       apiKey: "AIzaSyA3MQMxeOgU04E8zWEZJ9F60l47R7-fdMk",
@@ -250,7 +250,8 @@
         playerName: "Joueur",
         players: [], currentRound: 1, totalRounds: 3, letter: '', 
         activeCats: [], spinnerTimer: null, gameStartTimeout: null,
-        botDifficulty: 'medium', hasSubmitted: false, currentStatus: 'lobby'
+        botDifficulty: 'medium', hasSubmitted: false, currentStatus: 'lobby',
+        lastPlayerList: []
     };
 
     window.showScreen = (id) => {
@@ -291,10 +292,12 @@
         state.playerName = prompt("Ton pseudo :") || "Hôte";
         state.isHost = true;
         state.roomId = Math.floor(1000 + Math.random() * 8999).toString();
-        set(ref(db, 'rooms/' + state.roomId), {
+        const roomRef = ref(db, 'rooms/' + state.roomId);
+        set(roomRef, {
             status: 'lobby', hostId: state.playerId, round: 1,
             players: { [state.playerId]: { name: state.playerName, score: 0 } }
         });
+        onDisconnect(ref(db, `rooms/${state.roomId}/players/${state.playerId}`)).remove();
         document.getElementById('room-id-display').innerText = state.roomId;
         document.getElementById('btn-host-start').style.display = 'block';
         document.getElementById('lobby-wait-msg').style.display = 'none';
@@ -312,6 +315,7 @@
                 state.roomId = id; state.isHost = false;
                 state.playerName = prompt("Ton pseudo :") || "Joueur";
                 update(ref(db, `rooms/${state.roomId}/players/${state.playerId}`), { name: state.playerName, score: 0 });
+                onDisconnect(ref(db, `rooms/${state.roomId}/players/${state.playerId}`)).remove();
                 document.getElementById('room-id-display').innerText = state.roomId;
                 document.getElementById('btn-host-start').style.display = 'none';
                 document.getElementById('lobby-wait-msg').style.display = 'block';
@@ -324,14 +328,25 @@
     function initMultiplayerListeners() {
         onValue(ref(db, `rooms/${state.roomId}`), (snapshot) => {
             const data = snapshot.val(); if(!data) return;
-            state.currentStatus = data.status; // Stockage crucial du statut actuel
+            state.currentStatus = data.status;
 
             if(data.players) {
+                const currentPlayers = Object.keys(data.players);
+                // Detection de départ : on affiche un message mais on ne recharge plus
+                if (state.lastPlayerList.length > currentPlayers.length) {
+                    const leftId = state.lastPlayerList.find(id => !currentPlayers.includes(id));
+                    const leftName = (state.multiPlayersData && state.multiPlayersData[leftId]) ? state.multiPlayersData[leftId].name : "Un joueur";
+                    console.log(`${leftName} a quitté.`);
+                }
+                state.lastPlayerList = currentPlayers;
                 const list = document.getElementById('player-list');
                 list.innerHTML = Object.entries(data.players).map(([id, p]) => `<li>${p.name} ${id === data.hostId ? '<span class="host-badge">Hôte</span>' : ''}</li>`).join('');
             }
 
-            if(data.status === 'lobby') showScreen('screen-lobby');
+            if(data.status === 'lobby') {
+                state.hasSubmitted = false;
+                showScreen('screen-lobby');
+            }
             else if (data.status === 'setup' && !state.isHost) {
                 document.getElementById('setup-controls').style.display = 'none';
                 document.getElementById('setup-wait-msg').style.display = 'block';
@@ -343,7 +358,7 @@
             } 
             else if (data.status === 'playing') { state.letter = data.currentLetter; stopSpinnerUI(); } 
             else if (data.status === 'arbitrage') {
-                if(state.gameStartTimeout) clearTimeout(state.gameStartTimeout); // Annulation du timer de transition
+                if(state.gameStartTimeout) clearTimeout(state.gameStartTimeout); 
                 if(!state.hasSubmitted) forceSubmitWords(); 
                 state.multiPlayersData = data.players;
                 renderArbitrageTableMulti(data.players);
@@ -408,13 +423,9 @@
     function stopSpinnerUI() {
         clearInterval(state.spinnerTimer);
         document.getElementById('letter-spinner').innerText = state.letter;
-        
         if(state.gameStartTimeout) clearTimeout(state.gameStartTimeout);
-        
         state.gameStartTimeout = setTimeout(() => {
-            // SECURITÉ : Si le statut a déjà changé en arbitrage, on n'affiche pas l'écran de jeu
             if (state.currentStatus !== 'playing') return;
-
             document.getElementById('info-letter').innerText = state.letter;
             document.getElementById('info-round').innerText = state.currentRound;
             document.getElementById('info-total-rounds').innerText = state.totalRounds;
@@ -494,7 +505,10 @@
         calcScoresMulti(playersObj);
     }
 
-    window.setWordStatusMulti = (pId, cIdx, val) => { update(ref(db, `rooms/${state.roomId}/players/${pId}/statusArr/${cIdx}`), val); };
+    window.setWordStatusMulti = (pId, cIdx, val) => { 
+        const path = `rooms/${state.roomId}/players/${pId}/statusArr/${cIdx}`;
+        set(ref(db, path), val);
+    };
 
     function calcScoresMulti(playersObj) {
         let turnScores = {}; Object.keys(playersObj).forEach(id => turnScores[id] = 0);
@@ -584,9 +598,18 @@
     window.playAgain = () => {
         if(state.isMulti) {
             if(!state.isHost) return;
-            let updates = { status: 'lobby', round: 1 };
-            Object.keys(state.multiPlayersData).forEach(id => { updates[`rooms/${state.roomId}/players/${id}/score`] = 0; });
-            update(ref(db), updates);
+            const roomRef = ref(db, `rooms/${state.roomId}`);
+            get(roomRef).then((snap) => {
+                const data = snap.val();
+                let updates = { status: 'lobby', round: 1, currentLetter: null };
+                // On réinitialise uniquement les joueurs encore présents dans la DB
+                Object.keys(data.players).forEach(id => {
+                    updates[`players/${id}/score`] = 0;
+                    updates[`players/${id}/answers`] = null;
+                    updates[`players/${id}/statusArr`] = null;
+                });
+                update(roomRef, updates);
+            });
         } else location.reload();
     };
 
