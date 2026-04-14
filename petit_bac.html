@@ -328,16 +328,12 @@
     function initMultiplayerListeners() {
         onValue(ref(db, `rooms/${state.roomId}`), (snapshot) => {
             const data = snapshot.val(); if(!data) return;
+            
+            const prevStatus = state.currentStatus;
             state.currentStatus = data.status;
 
             if(data.players) {
                 const currentPlayers = Object.keys(data.players);
-                // Detection de départ : on affiche un message mais on ne recharge plus
-                if (state.lastPlayerList.length > currentPlayers.length) {
-                    const leftId = state.lastPlayerList.find(id => !currentPlayers.includes(id));
-                    const leftName = (state.multiPlayersData && state.multiPlayersData[leftId]) ? state.multiPlayersData[leftId].name : "Un joueur";
-                    console.log(`${leftName} a quitté.`);
-                }
                 state.lastPlayerList = currentPlayers;
                 const list = document.getElementById('player-list');
                 list.innerHTML = Object.entries(data.players).map(([id, p]) => `<li>${p.name} ${id === data.hostId ? '<span class="host-badge">Hôte</span>' : ''}</li>`).join('');
@@ -356,7 +352,13 @@
                 state.activeCats = data.config.cats; state.totalRounds = data.config.rounds; state.currentRound = data.round;
                 startSpinnerUI(data.spinnerPlayerId, data.players[data.spinnerPlayerId].name);
             } 
-            else if (data.status === 'playing') { state.letter = data.currentLetter; stopSpinnerUI(); } 
+            else if (data.status === 'playing') { 
+                state.letter = data.currentLetter; 
+                // PROTECTION ANTI-EFFACEMENT : Ne pas relancer stopSpinnerUI si on est déjà en train de jouer
+                if (prevStatus !== 'playing') {
+                    stopSpinnerUI(); 
+                }
+            } 
             else if (data.status === 'arbitrage') {
                 if(state.gameStartTimeout) clearTimeout(state.gameStartTimeout); 
                 if(!state.hasSubmitted) forceSubmitWords(); 
@@ -476,6 +478,15 @@
         renderArbitrageTableSolo();
     }
 
+    // FONCTION DE COMPARAISON PRÉCISE (Espaces, Accents, Partielle comme orange foncé)
+    function areWordsIdentical(w1, w2) {
+        if (!w1 || !w2) return false;
+        const normalize = (s) => s.toLowerCase().trim().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+        const n1 = normalize(w1);
+        const n2 = normalize(w2);
+        return n1 === n2 || n1.startsWith(n2) || n2.startsWith(n1);
+    }
+
     function renderArbitrageTableMulti(playersObj) {
         showScreen('screen-arbitrage');
         document.getElementById('arb-letter').innerText = state.letter;
@@ -517,12 +528,17 @@
             Object.keys(playersObj).forEach(pId => {
                 const p = playersObj[pId];
                 if(p.statusArr && p.statusArr[cIdx] === 2) {
-                    let w = p.answers[cIdx].toLowerCase().trim();
-                    if(!matches[w]) matches[w] = []; matches[w].push(pId);
+                    let w = p.answers[cIdx];
+                    let foundKey = null;
+                    for (let key in matches) {
+                        if (areWordsIdentical(w, key)) { foundKey = key; break; }
+                    }
+                    if (foundKey) matches[foundKey].push(pId);
+                    else matches[w] = [pId];
                 }
             });
-            for(let w in matches) {
-                let ids = matches[w];
+            for(let key in matches) {
+                let ids = matches[key];
                 let pts = ids.length === 1 ? 10 : (ids.length === 2 ? 5 : 0);
                 ids.forEach(id => turnScores[id] += pts);
             }
@@ -560,12 +576,17 @@
             let matches = {};
             state.players.forEach((p, pIdx) => {
                 if(p.statusArr[cIdx] === 2) {
-                    let w = p.answers[cIdx].toLowerCase().trim();
-                    if(!matches[w]) matches[w] = []; matches[w].push(pIdx);
+                    let w = p.answers[cIdx];
+                    let foundKey = null;
+                    for (let key in matches) {
+                        if (areWordsIdentical(w, key)) { foundKey = key; break; }
+                    }
+                    if (foundKey) matches[foundKey].push(pIdx);
+                    else matches[w] = [pIdx];
                 }
             });
-            for(let w in matches) {
-                let ids = matches[w]; let pts = ids.length === 1 ? 10 : (ids.length === 2 ? 5 : 0);
+            for(let key in matches) {
+                let ids = matches[key]; let pts = ids.length === 1 ? 10 : (ids.length === 2 ? 5 : 0);
                 ids.forEach(id => turnScores[id] += pts);
             }
         });
@@ -602,7 +623,6 @@
             get(roomRef).then((snap) => {
                 const data = snap.val();
                 let updates = { status: 'lobby', round: 1, currentLetter: null };
-                // On réinitialise uniquement les joueurs encore présents dans la DB
                 Object.keys(data.players).forEach(id => {
                     updates[`players/${id}/score`] = 0;
                     updates[`players/${id}/answers`] = null;
