@@ -308,7 +308,12 @@
         get(ref(db, `rooms/${id}`)).then((snapshot) => {
             if(snapshot.exists()) {
                 const data = snapshot.val();
-                if (data.status !== 'lobby') return alert("Partie déjà commencée !");
+                
+                // --- MODIFICATION ICI : On autorise le join si status 'lobby' OU 'setup' ---
+                if (data.status !== 'lobby' && data.status !== 'setup') {
+                    return alert("Désolé, la partie est déjà lancée !");
+                }
+                
                 state.roomId = id; state.isHost = false;
                 state.playerName = prompt("Ton pseudo :") || "Joueur";
                 update(ref(db, `rooms/${state.roomId}/players/${state.playerId}`), { name: state.playerName, score: 0 });
@@ -340,7 +345,6 @@
             } 
             else if (data.status === 'playing') { state.letter = data.currentLetter; stopSpinnerUI(); } 
             else if (data.status === 'arbitrage') {
-                // IMPORTANT : On s'assure d'avoir soumis nos propres mots avant d'afficher le tableau
                 if(!state.hasSubmitted) forceSubmitWords(); 
                 state.multiPlayersData = data.players;
                 renderArbitrageTableMulti(data.players);
@@ -420,11 +424,10 @@
         });
     }
 
-    // --- CORRECTION : forceSubmit avant de changer de statut ---
     window.triggerFinish = async () => {
         if(state.hasSubmitted) return;
         if(state.isMulti) {
-            await forceSubmitWords(); // On attend que Firebase enregistre
+            await forceSubmitWords(); 
             update(ref(db, `rooms/${state.roomId}`), { status: 'arbitrage' });
         } else triggerFinishSolo();
     };
@@ -434,7 +437,6 @@
         state.hasSubmitted = true;
         const answers = state.activeCats.map((_, i) => document.getElementById('in-'+i).value.trim());
         const statusArr = answers.map(w => (w && w.toUpperCase().startsWith(state.letter)) ? 1 : 0);
-        // On renvoie une promesse pour s'assurer que c'est fini
         return update(ref(db, `rooms/${state.roomId}/players/${state.playerId}`), { answers, statusArr });
     }
 
@@ -567,6 +569,8 @@
 
     window.playAgain = () => {
         if(state.isMulti) {
+            if(!state.isHost) return;
+            // --- REPASSAGE EN 'lobby' : Re-permet de rejoindre ---
             let updates = { status: 'lobby', round: 1 };
             Object.keys(state.multiPlayersData).forEach(id => { updates[`players/${id}/score`] = 0; });
             update(ref(db, `rooms/${state.roomId}`), updates);
