@@ -1212,10 +1212,12 @@ tr:hover td { background:rgba(255,255,255,0.3); }
         players: [], currentRound: 1, totalRounds: 3, letter: '',
         activeCats: [], spinnerTimer: null, gameStartTimeout: null,
         botDifficulty: 'medium', hasSubmitted: false, currentStatus: 'lobby',
-        lastPlayerList: [], usedLetters: []
+        lastPlayerList: [], usedLetters: [], rejoinWaiting: false
     };
 
-    /* ── AVERTISSEMENT RECHARGEMENT ET INTERCEPTION RETOUR (Spécial iOS/Safari) ── */
+    /* ── AVERTISSEMENT RECHARGEMENT ET INTERCEPTION RETOUR (PC, Android Chrome, Firefox) ── */
+    // Sur iOS Safari, le navigateur N'AFFICHE PAS de dialogue de confirmation pour beforeunload.
+    // La reprise de partie après rechargement est donc gérée séparément via pagehide + session.
     window.onbeforeunload = function(e) {
         const activeScreen = document.querySelector('.screen.active');
         if (activeScreen && activeScreen.id !== 'screen-menu' && activeScreen.id !== 'screen-multi-choice' && activeScreen.id !== 'screen-final') {
@@ -1240,12 +1242,29 @@ tr:hover td { background:rgba(255,255,255,0.3); }
         }
     });
 
-    /* ── RETOUR À L'ACCUEIL APRÈS RECHARGEMENT CONFIRMÉ ── */
-    window.addEventListener('unload', () => {
+    /* ── SAUVEGARDE D'URGENCE AVANT FERMETURE — iOS/Safari & tous navigateurs ── */
+    // 'pagehide' se déclenche de façon fiable sur iOS (et partout ailleurs) juste avant
+    // la disparition de la page, que ce soit un rechargement, une fermeture ou un crash.
+    // On SAUVEGARDE l'état ici (sans effacer la session) pour permettre la reprise de partie.
+    // La session n'est effacée que par confirmQuit() ou en fin de partie normale.
+    window.addEventListener('pagehide', () => {
         const activeScreen = document.querySelector('.screen.active');
-        if (activeScreen && activeScreen.id !== 'screen-menu' && activeScreen.id !== 'screen-multi-choice' && activeScreen.id !== 'screen-final') {
-            clearSession();
+        if (!activeScreen) return;
+        const id = activeScreen.id;
+        // Pas de sauvegarde si on est sur un écran de menu ou d'accueil
+        if (id === 'screen-menu' || id === 'screen-multi-choice' || id === 'screen-final') return;
+        // Partie solo : capturer les réponses en cours de saisie avant que la page disparaisse
+        if (!state.isMulti) {
+            if (id === 'screen-game' && state.activeCats && state.activeCats.length > 0 && state.players && state.players[0]) {
+                state.players[0].currentAnswers = state.activeCats.map((_, i) => {
+                    const el = document.getElementById('in-' + i);
+                    return el ? el.value : '';
+                });
+            }
+            saveSessionSolo();
         }
+        // Partie multi : saveSessionMulti() a déjà été appelé lors de la connexion au salon.
+        // Rien de supplémentaire à faire ici, le roomId/playerId est déjà persisté.
     });
 
     /* ── ÉCRANS ── */
@@ -1331,6 +1350,11 @@ tr:hover td { background:rgba(255,255,255,0.3); }
                             state.playerId = session.playerId;
                             state.playerName = session.playerName;
                             state.isHost = session.isHost;
+                            // Si la manche est en cours (playing/arbitrage), mettre le joueur en attente
+                            // de la prochaine manche avant de lui afficher l'interface de jeu.
+                            if (roomData.status === 'playing' || roomData.status === 'arbitrage') {
+                                state.rejoinWaiting = true;
+                            }
                             document.getElementById('room-id-display').innerText = state.roomId;
                             update(ref(db, `rooms/${state.roomId}/players/${state.playerId}`), { name: state.playerName, score: roomData.players?.[state.playerId]?.score || 0 });
                             onDisconnect(ref(db, `rooms/${state.roomId}/players/${state.playerId}`)).remove();
@@ -1512,6 +1536,21 @@ tr:hover td { background:rgba(255,255,255,0.3); }
                 state.lastPlayerList = Object.keys(data.players);
                 const list = document.getElementById('player-list');
                 list.innerHTML = Object.entries(data.players).map(([id,p]) => `<li>${p.name} ${id===data.hostId?'<span class="host-badge">Hôte</span>':''}</li>`).join('');
+            }
+            // Gestion du rejoin en cours de partie : le joueur attend la prochaine manche
+            if (state.rejoinWaiting) {
+                // La manche suivante commence (spinning) ou on est retourné au lobby : lever l'attente
+                if (data.status === 'spinning' || data.status === 'lobby') {
+                    state.rejoinWaiting = false;
+                    // On laisse le code ci-dessous gérer l'affichage normalement
+                } else {
+                    // Manche en cours : afficher l'écran de lobby en mode attente
+                    document.getElementById('btn-host-start').style.display = 'none';
+                    document.getElementById('lobby-wait-msg').style.display = 'flex';
+                    document.getElementById('lobby-wait-msg').innerText = '⏳ Manche en cours — tu rejoindras à la prochaine manche…';
+                    showScreen('screen-lobby');
+                    return;
+                }
             }
             if(data.status==='lobby') { state.hasSubmitted=false; showScreen('screen-lobby'); }
             else if(data.status==='setup') {
