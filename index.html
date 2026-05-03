@@ -1639,14 +1639,88 @@ tr:hover td { background:rgba(255,255,255,0.3); }
     }
 
     function startBotsSolo() {
-        state.players.forEach(p=>{
-            if(p.isBot){
-                let time=25000;
-                if(state.botDifficulty==='easy') time=35000+Math.random()*10000;
-                else if(state.botDifficulty==='medium') time=20000+Math.random()*10000;
-                else if(state.botDifficulty==='hard') time=12000+Math.random()*5000;
-                p.botTimer=setTimeout(()=>{ if(document.getElementById('screen-game').classList.contains('active')) triggerFinishSolo(); },time);
+        const numCats = state.activeCats.length;
+        if (numCats === 0) return;
+
+        // Réinitialiser les compteurs de fin de tour
+        state.botsFinished = 0;
+        state.botsCount = state.players.filter(p => p.isBot).length;
+        state.gameStartTime = Date.now();
+        if (state.botFinishTimer) { clearTimeout(state.botFinishTimer); state.botFinishTimer = null; }
+
+        if (state.botsCount === 0) return;
+
+        // Durée simulée PAR THÈME : réflexion + frappe (en ms), selon la difficulté
+        let minPerCat, maxPerCat, maxTotal;
+        if (state.botDifficulty === 'easy') {
+            minPerCat = 4500; maxPerCat = 10000; maxTotal = 55000;
+        } else if (state.botDifficulty === 'medium') {
+            minPerCat = 2800; maxPerCat = 6500;  maxTotal = 32000;
+        } else { // hard
+            minPerCat = 1600; maxPerCat = 3800;  maxTotal = 18000;
+        }
+
+        const botActivityEl = document.getElementById('bot-activity');
+
+        state.players.forEach(p => {
+            if (!p.isBot) return;
+            if (p.botTimer)    clearTimeout(p.botTimer);
+            if (p.botMidTimer) clearTimeout(p.botMidTimer);
+
+            // Temps total = somme du temps par thème, plafonné
+            let totalTime = 0;
+            for (let i = 0; i < numCats; i++) {
+                totalTime += minPerCat + Math.random() * (maxPerCat - minPerCat);
             }
+            totalTime = Math.min(totalTime, maxTotal);
+            // Léger décalage aléatoire entre bots pour qu'ils ne finissent pas simultanément
+            totalTime += Math.random() * 4000;
+
+            // Message intermédiaire : le bot "réfléchit" vers 30-60 % du temps
+            const midTime = totalTime * (0.30 + Math.random() * 0.30);
+            p.botMidTimer = setTimeout(() => {
+                if (document.getElementById('screen-game').classList.contains('active') && botActivityEl) {
+                    botActivityEl.textContent = `✏️ ${p.name} réfléchit…`;
+                }
+            }, midTime);
+
+            // Timer principal : le bot a fini de remplir ses réponses
+            p.botTimer = setTimeout(() => {
+                if (!document.getElementById('screen-game').classList.contains('active')) return;
+
+                if (botActivityEl) botActivityEl.textContent = `✅ ${p.name} a terminé ses réponses !`;
+
+                state.botsFinished = (state.botsFinished || 0) + 1;
+
+                // La fin du tour n'est déclenchée que lorsque TOUS les bots ont terminé
+                if (state.botsFinished >= state.botsCount) {
+                    const elapsed = Date.now() - state.gameStartTime;
+
+                    // Vérifier si le joueur a commencé à écrire quelque chose
+                    const playerHasAnswers = state.activeCats.some((_, i) => {
+                        const el = document.getElementById('in-' + i);
+                        return el && el.value.trim().length > 0;
+                    });
+
+                    // Temps minimum avant de clore le tour :
+                    // 12 s si le joueur a déjà une réponse, 30 s sinon
+                    const minTime = playerHasAnswers ? 12000 : 30000;
+                    const waitMore = Math.max(0, minTime - elapsed);
+
+                    const doFinish = () => {
+                        if (document.getElementById('screen-game').classList.contains('active')) {
+                            triggerFinishSolo();
+                        }
+                    };
+
+                    if (waitMore > 0) {
+                        if (botActivityEl) botActivityEl.textContent = `⏳ Fin du tour dans quelques secondes…`;
+                        state.botFinishTimer = setTimeout(doFinish, waitMore);
+                    } else {
+                        doFinish();
+                    }
+                }
+            }, totalTime);
         });
     }
 
@@ -1665,6 +1739,16 @@ tr:hover td { background:rgba(255,255,255,0.3); }
     }
 
     function triggerFinishSolo() {
+        if (state.hasSubmitted) return;
+        state.hasSubmitted = true;
+        // Annuler tous les timers de bots encore en suspens
+        state.players.forEach(p => {
+            if (p.isBot) {
+                if (p.botTimer)    { clearTimeout(p.botTimer);    p.botTimer    = null; }
+                if (p.botMidTimer) { clearTimeout(p.botMidTimer); p.botMidTimer = null; }
+            }
+        });
+        if (state.botFinishTimer) { clearTimeout(state.botFinishTimer); state.botFinishTimer = null; }
         state.players.forEach(p=>{
             if(!p.isBot) p.answers=state.activeCats.map((_,i)=>document.getElementById('in-'+i).value.trim());
             else p.answers=state.activeCats.map(c=>{
